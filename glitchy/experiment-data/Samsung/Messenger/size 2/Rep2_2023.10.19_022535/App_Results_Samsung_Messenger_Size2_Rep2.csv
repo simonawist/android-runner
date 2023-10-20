@@ -1,0 +1,6 @@
+repetition_no,start_time,provider,kind,size,execution_duration,end_time
+2,12-10-2023 23:23:11 UTC,Messenger,text,2,83,12-10-2023 23:26:35 UTC
+2,12-10-2023 23:26:35 UTC,Messenger,image,2,85,12-10-2023 23:30:00 UTC
+2,12-10-2023 23:30:00 UTC,Messenger,video,2,73,12-10-2023 23:33:13 UTC
+2,12-10-2023 23:33:13 UTC,Messenger,audio,2,87,12-10-2023 23:36:41 UTC
+2,12-10-2023 23:36:41 UTC,Messenger,file,2,74,12-10-2023 23:39:55 UTC
