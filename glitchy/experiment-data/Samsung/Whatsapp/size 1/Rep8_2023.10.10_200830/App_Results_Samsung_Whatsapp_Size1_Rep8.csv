@@ -1,0 +1,6 @@
+repetition_no,start_time,provider,kind,size,execution_duration,end_time
+8,10-10-2023 18:08:43 UTC,WhatsApp,image,1,91,10-10-2023 18:12:15 UTC
+8,10-10-2023 18:12:15 UTC,WhatsApp,file,1,88,10-10-2023 18:15:43 UTC
+8,10-10-2023 18:15:43 UTC,WhatsApp,video,1,90,10-10-2023 18:19:14 UTC
+8,10-10-2023 18:19:14 UTC,WhatsApp,text,1,89,10-10-2023 18:22:43 UTC
+8,10-10-2023 18:22:43 UTC,WhatsApp,audio,1,88,10-10-2023 18:26:12 UTC
