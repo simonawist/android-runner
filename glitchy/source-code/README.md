@@ -65,6 +65,8 @@ sudo ifconfig wlan0 up
 sudo reboot
 ```
 - after restart, the RPi automatically connected to the laptop's WiFi. The Android device was connected via the same laptop's WiFi (and connected via port 5555 to the RPi). This allowed the experiment to be run without the need to connect a USB cable to the RPi, and therefore avoiding the device to be charged during the run (instead, the device was charged between runs).
+
+https://github.com/simonawist/android-runner/blob/master/glitchy/Experiment%20setup.png
 ___
 Before running the experiment, the Android devices were prepared as follows:
 - all devices wiped (factory reset)
