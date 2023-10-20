@@ -30,7 +30,7 @@ to collect data from experiment execute:
 python3 android-runner android-runner/config.json
 ```
 
-Inside `android-runner` you can change the parameters of the `config.json` file - pls take a look.
+Inside `android-runner` you can change the parameters of the  `devices.json` and `config.json` files - pls take a look.
 
 ___
 The Raspberry Pi is configured following this guide:
