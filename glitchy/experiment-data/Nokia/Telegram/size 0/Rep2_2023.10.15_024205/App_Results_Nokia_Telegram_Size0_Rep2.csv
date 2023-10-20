@@ -1,0 +1,6 @@
+repetition_no,start_time,provider,kind,size,execution_duration,end_time
+2,15-10-2023 00:42:17 UTC,Telegram,video,0,84,15-10-2023 00:45:42 UTC
+2,15-10-2023 00:45:42 UTC,Telegram,audio,0,82,15-10-2023 00:49:04 UTC
+2,15-10-2023 00:49:04 UTC,Telegram,file,0,84,15-10-2023 00:52:29 UTC
+2,15-10-2023 00:52:29 UTC,Telegram,image,0,81,15-10-2023 00:55:51 UTC
+2,15-10-2023 00:55:51 UTC,Telegram,text,0,83,15-10-2023 00:59:14 UTC
