@@ -6,7 +6,7 @@ ___
 - or using the VNC viewer on port 5900 (to use the GUI)
 ___
 
-to download the `glitchy` repository to RPi execute:
+Supposing that the source code is uploaded to `simonawist` GitHub account, to download the `glitchy` repository to RPi execute:
 
 ```
 git clone https://github.com/simonawist/glitchy.git
