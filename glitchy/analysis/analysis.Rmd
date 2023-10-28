@@ -1,0 +1,857 @@
+---
+title: "Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Load libraries
+library(tidyverse)
+library(car)
+library(ggpubr)
+library(ggplot2)
+library(testit)
+library(ARTool)
+library(effsize)
+# Set paths
+data_path = "../data/processed_data.csv" #"./data.csv"
+exploratory_figures_path = "./figures/exploratory/"
+final_figures_path = "./figures/final/"
+```
+
+# Data preparation
+First we define the variables which will be present in the dataset
+```{r}
+# Define variables
+devices = c("Samsung", "Nokia")
+n_devices = length(devices)
+sizes = c("small", "medium", "large")
+n_sizes = length(sizes)
+n_repetitions = 10
+repetitions = 0:(n_repetitions-1)
+message_types = c("text", "image", "video", "audio", "document")
+n_message_types = length(message_types)
+apps = c("Telegram", "WhatsApp", "Messenger")
+n_apps = length(apps)
+n = n_devices * n_sizes * n_repetitions * n_message_types * n_apps
+```
+
+## Load Data
+Then we load the dataset from a csv file, clean it and separate the network data (which is aggregated over message types) from the other data which is not aggregated.
+```{r}
+# Determine which columns to select
+col_selection = c("device", "app_name", "size_name", "repetition", "message_type", "time_sec", "cpu", "memory", "energy_simple_J", "tcp_no_packets", "tcp_size_packets_MB", "udp_no_packets", "udp_size_packets_MB")
+# Load data
+data = read.table(data_path, sep=",", header=TRUE)
+# Select only 900 rows and wanted columns
+data = data[1:900, col_selection]
+# Rename several columns
+colnames(data) = c("device", "app", "size", "repetition", "message_type", "time_sec", "cpu", "memory", "energy", "tcp_no", "tcp_size", "udp_no", "udp_size")
+# Make energy values positive
+data$energy = -1 * data$energy
+# Reorder levels
+data$size = factor(data$size, levels=sizes)
+data$app = factor(data$app, levels=apps)
+data$message_type = factor(data$message_type, levels=message_types)
+
+# Split into regular and network data
+network_data = data
+# Clean regular data
+regular_col_selection = c("device", "app", "size", "repetition", "message_type", "time_sec", "cpu", "memory", "energy")
+data = data[, regular_col_selection]
+# Clean network data
+network_col_selection = c("device", "app", "size", "repetition", "time_sec", "energy", "tcp_no", "tcp_size", "udp_no", "udp_size")
+network_data = network_data[, network_col_selection]
+for(device in devices) {
+  for(app in apps) {
+    for(size in sizes) {
+      for(repetition in repetitions) {
+        slice = network_data[network_data$device==device & network_data$app==app & network_data$size==size & network_data$repetition==repetition,]
+        row_name = rownames(slice)[1]
+        network_data[row_name,"time_sec"] = sum(slice$time_sec)
+        network_data[row_name,"energy"] = sum(slice$energy)
+      }
+    }
+  }
+}
+# Remove NA values
+network_data = na.omit(network_data) 
+```
+
+# Data Exploration
+Then we begin exploring the data
+
+## Metrics
+We start by exploring the different metrics: the dependent variable (energy consumption) as well as the support metrics (Memory, CPU and TDP & UDP)
+```{r}
+# Define metrics
+# Energy, CPU and Memory
+metrics = c("energy", "cpu", "memory")
+metric_titles = c("Energy", "CPU", "Memory")
+metric_labels = c("Energy (Joule)", "CPU utilization (%)", "Memory usage (bytes)")
+# Network metrics
+network_metrics = c("tcp_no", "tcp_size", "udp_no", "udp_size")
+network_metric_titles = c("TCP #packets", "TCP size", "UDP #packets", "UDP size")
+network_metric_labels = c("TCP (number of packets)", "TCP size (MB)", "UDP (number of packets)", "UDP size (MB)")
+```
+
+### Descriptive statistics
+First we calculate descriptive statistics for the non-aggregated metrics
+```{r}
+metric_summary = data %>%
+  summarise(across(all_of(metrics), .fns = 
+                     list(min = min,
+                          median = median,
+                          mean = mean,
+                          sd = sd,
+                          max = max))) %>%
+  pivot_longer(everything(), names_sep='_', names_to=c('variable', '.value'))
+metric_summary
+
+```
+
+Then we calculate descriptive statistics for the aggregated metrics (network metrics)
+```{r}
+network_summary = network_data %>%
+  summarise(across(all_of(network_metrics), .fns = 
+                     list(min = min,
+                          median = median,
+                          mean = mean,
+                          sd = sd,
+                          max = max))) %>%
+  pivot_longer(everything(), names_pattern="(tcp_no|tcp_size|udp_no|udp_size)_(.*)", names_to=c('variable', '.value'))
+network_summary
+```
+
+### Distributions and normality
+For each metric we will:  
+(i) create a density plot  
+(ii) create a qq-plot  
+(iii) perform the Shapiro-Wilk test  
+To inspect the distribution of each metric and assess normality
+```{r}
+plot_density = function(df, metric, title, label) {
+  # Calculate mean and sd
+  mean = mean(df[[metric]]) %>% round(digits=2)
+  median = median(df[[metric]]) %>% round(digits=2)
+  sd = sd(df[[metric]]) %>% round(digits=2)
+  
+  # Create a density plot
+  return(ggplot(df, aes(x=.data[[metric]])) +
+    geom_density() +
+    theme_pubr() +
+    stat_central_tendency(type = "mean", color = "red", linetype = "dashed") +
+    stat_central_tendency(type = "median", color = "blue", linetype = "dashed") +
+    # annotate("text", x = mean*1.01, y=0.1 , label = paste("Mean =", mean)) +
+    geom_vline(xintercept=c(mean+sd, mean-sd), color = "red", linetype="dotted") +
+    labs(title=title,
+         x=label) + 
+    theme(plot.title = element_text(hjust = 0.5)))
+}
+
+assess_normality = function(df, metric, title, label) {
+  # Create a density plot
+  print(plot_density(df, metric, title, label))
+  ggsave(sprintf("%snormality/metrics/%s_density_plot.png", exploratory_figures_path, metric))
+  # Create a QQ-plot
+  png(sprintf("%snormality/metrics/%s_qq_plot.png", exploratory_figures_path, metric))
+  qqPlot(df[[metric]], ylab=label, main=paste("QQ-plot of", title))
+  dev.off()
+  qqPlot(df[[metric]], ylab=label, main=paste("QQ-plot of", title))
+  # Perform Shapiro-Wilk test
+  shapiro_test = shapiro.test(df[[metric]])
+  print(title)
+  print(shapiro_test)
+}
+
+assess_normalities = function(df, metrics, titles, labels) {
+  assert("metrics, titles and labels are of equal length", length(metrics) == length(titles) & length(metrics) == length(labels))
+  for(i in 1:length(metrics)) {
+    assess_normality(df, metrics[i], titles[i], labels[i])
+  }
+}
+
+# Assess normality for Energy, CPU and Memory
+assess_normalities(data, metrics, metric_titles, metric_labels)
+# Assess normality for Network metrics
+assess_normalities(network_data, network_metrics, network_metric_titles, network_metric_labels)
+```
+If p<0.05 we reject the null hypothesis that the metric is normally distributed.  
+Otherwise we retain the assumption of normality.
+
+### Investigate metrics per device
+To see if the data shows great difference between devices we make density plots for all metrics per device
+```{r}
+plot_density_per_device = function(df, metric, title, label) {
+  return(ggplot(df, aes(x=.data[[metric]], fill=device)) +
+  geom_density(alpha=0.4) +
+  theme_pubr() +
+  labs(title=sprintf("Density plot of %s per Device", title),
+       x=label) + 
+  theme(legend.title=element_blank(),
+        plot.title = element_text(hjust = 0.5)))
+}
+
+plot_densities_per_device = function(df, metrics, titles, labels) {
+  assert("metrics, titles and labels are of equal length", length(metrics) == length(titles) & length(metrics) == length(labels))
+  for(i in 1:length(metrics)) {
+    print(plot_density_per_device(df, metrics[i], titles[i], labels[i]))
+    ggsave(sprintf("%smetrics_per_device/%s_density_plot_per_device.png", exploratory_figures_path, metrics[i]))
+  }
+}
+
+# Energy, CPU and Memory
+plot_densities_per_device(data, metrics, metric_titles, metric_labels)
+# Network metrics
+plot_densities_per_device(network_data, network_metrics, network_metric_titles, network_metric_labels)
+```
+
+### Further inspect memory
+As the memory data is clearly multimodal, even when split on device, we make density plots for our different independent variables to identify other causes.
+```{r}
+ggplot(data, aes(x=message_type, y=memory, group=message_type)) +
+  facet_grid(device ~ app) +
+  geom_violin(trim = FALSE, alpha = 0.5, show_guide = FALSE, aes(color=message_type)) +
+  geom_boxplot(alpha=1, color="black", width=.3, fill="white") +
+  stat_summary(fun.y=mean, colour="black", geom="point",
+               shape=5, size=1, show_guide = FALSE) +
+  # theme_pubr() #+
+  labs(title="Violin plot of Memory per group",
+       x="Message type",
+       y="Memory") +
+  theme(legend.title=element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.text=element_text(size=8))
+
+ggsave(sprintf("%smemory/memory_violin_box_plot_per_group.png", exploratory_figures_path))
+```
+We see that memory differs a lot for Messenger, and for the Samsung device differences between Telegram and WhatsApp are also large.
+
+### Further inspect CPU
+```{r}
+ggplot(data, aes(x=message_type, y=cpu, group=message_type)) +
+  facet_grid(device ~ app) +
+  geom_violin(trim = FALSE, alpha = 0.5, show_guide = FALSE, aes(color=message_type)) +
+  geom_boxplot(alpha=1, color="black", width=.3, fill="white") +
+  stat_summary(fun.y=mean, colour="black", geom="point",
+               shape=5, size=1, show_guide = FALSE) +
+  # theme_pubr() #+
+  labs(title="Violin plot of CPU per group",
+       x="Message type",
+       y="CPU") +
+  theme(legend.title=element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.text=element_text(size=8))
+
+ggsave(sprintf("%scpu/cpu_violin_box_plot_per_group.png", exploratory_figures_path))
+```
+
+### Further inspect network metrics
+TCP is also clearly multi-modal and therefore we further inspect network metrics as well and make density plots for our different independent variables.
+```{r}
+plot_violin_box_network_metric_facet = function(df, metric, title, label) {
+  return(ggplot(df, aes(x=size, y=.data[[metric]], group=size)) +
+    facet_grid(device ~ app) +
+    geom_violin(trim = FALSE, alpha = 0.5, show_guide = FALSE, aes(color=size)) +
+    geom_boxplot(alpha=1, color="black", width=.3, fill="white") +
+    stat_summary(fun.y=mean, colour="black", geom="point",
+                 shape=5, size=1, show_guide = FALSE) +
+    # theme_pubr() #+
+    labs(title=sprintf("Violin plot of %s per group", title),
+         # x="",
+         y=label) +
+    theme(legend.title=element_blank(),
+          plot.title = element_text(hjust = 0.5)))
+}
+
+plot_violin_box_network_metrics_facet = function(df, metrics, titles, labels) {
+  assert("metrics, titles and labels are of equal length", length(metrics) == length(titles) & length(metrics) == length(labels))
+  for(i in 1:length(metrics)) {
+    print(plot_violin_box_network_metric_facet(df, metrics[i], titles[i], labels[i]))
+    ggsave(sprintf("%snetwork/per_group/%s_violin_box_plot_per_group.png", exploratory_figures_path, metrics[i]))
+  }
+}
+
+plot_violin_box_network_metrics_facet(network_data, network_metrics, network_metric_titles, network_metric_labels)
+```
+Again we see a similar pattern with Messenger being very different from Telegram and WhatsApp for TCP. For UDP we do not see such a difference. Furthermore, for all network measures we spot several extreme values.
+
+```{r}
+descriptives_network_metric = function(mt) {
+  return(network_data %>%
+    group_by(app, size) %>%
+    summarise(across(all_of(mt), .fns = 
+                       list(min = min,
+                            median = median,
+                            mean = mean,
+                            sd = sd,
+                            max = max))))
+}
+
+descriptives_network_metrics = function(metrics) {
+  for(metric in metrics) {
+    print(descriptives_network_metric(metric))
+  }
+}
+
+descriptives_network_metrics(network_metrics)
+```
+Due to outliers, tables with descriptive statistics are more informative.
+
+```{r}
+plot_violin_box_network_metric_per_app = function(df, metric, title, label) {
+  return(ggplot(df, aes(x=app, y=.data[[metric]], group=app)) +
+    geom_violin(trim = FALSE, alpha = 0.5, show_guide = FALSE, aes(color=app)) +
+    geom_boxplot(alpha=1, color="black", width=.3, fill="white") +
+    stat_summary(fun.y=mean, colour="black", geom="point",
+                 shape=5, size=1, show_guide = FALSE) +
+    # theme_pubr() #+
+    labs(title=sprintf("Violin plot of %s per app", title),
+         # x="",
+         y=label) +
+    theme(legend.title=element_blank(),
+          plot.title = element_text(hjust = 0.5)))
+}
+
+plot_violin_box_network_metrics_per_app = function(df, metrics, titles, labels) {
+  assert("metrics, titles and labels are of equal length", length(metrics) == length(titles) & length(metrics) == length(labels))
+  for(i in 1:length(metrics)) {
+    print(plot_violin_box_network_metric_per_app(df, metrics[i], titles[i], labels[i]))
+    ggsave(sprintf("%snetwork/per_app/%s_violin_box_plot_per_app.png", exploratory_figures_path, metrics[i]))
+  }
+}
+
+plot_violin_box_network_metrics_per_app(network_data, network_metrics, network_metric_titles, network_metric_labels)
+```
+The pattern clearly returns on the aggregated level
+
+## Relationship between support metrics and energy
+To be able to explain the energy consumption, we explore its relationship with the support metrics.  
+We will use the pearson correlation if the support metric and energy are both normally distributed. We will use the non-parametric spearman correlation otherwise.
+```{r}
+plot_scatter = function(df, xMetric, yMetric, xTitle, yTitle, xLabel, yLabel, correlation) {
+  return(ggplot(df, aes(x=.data[[xMetric]], y=.data[[yMetric]])) +
+    geom_point() +
+    geom_smooth(method='lm', formula=y ~ x) +
+    stat_cor(method=correlation) +
+    theme_pubr() +
+    labs(title=sprintf("Scatterplot of %s and %s", xTitle, yTitle),
+         x=xLabel,
+         y=yLabel) + 
+    theme(plot.title = element_text(hjust = 0.5)))
+}
+
+plot_scatters = function(df, metrics, titles, labels, correlations) {
+  assert("metrics, titles and labels are of equal length", length(metrics) == length(titles) & length(metrics) == length(labels) & length(metrics) == length(correlations))
+  for(i in 2:length(metrics)) {
+    print(plot_scatter(df, metrics[1], metrics[i], titles[1], titles[i], labels[1], labels[i], correlations[i]))
+    ggsave(sprintf("%smetric_correlations/energy/%s_%s_scatter_plot.png", exploratory_figures_path, metrics[1], metrics[i]))
+  }
+}
+
+# Scatter plots with CPU and Memory
+correlations = c("spearman", "spearman", "spearman")
+plot_scatters(data, metrics, metric_titles, metric_labels, correlations)
+# Scatter plots with Network metrics
+network_correlations = c("spearman", "spearman", "spearman", "spearman", "spearman")
+plot_scatters(network_data, c("energy", network_metrics), c("Energy", network_metric_titles), c("Energy (Joule)", network_metric_labels), network_correlations)
+```
+As earlier we found that energy is non-normally distributed, we have only used Spearman's correlation.  
+Energy and CPU show a clear relation, whereas the other support metrics do not.
+
+### Relationship between duration and metrics
+Because the duration of the trials varies so much, we decided to see how that affects our metrics
+```{r}
+plot_scatter(data, metrics[1], "time_sec", metric_titles[1], "Duration", metric_labels[1], "Trial duration (seconds)", "spearman")
+
+ggsave(sprintf("%smetric_correlations/duration/%s_duration_scatter_plot.png", exploratory_figures_path, metrics[1]))
+```
+Again we used spearman's correlation, among others because of the non-normality of energy consumption.  
+We see a very clear correlation between energy and duration which should be taken into account when interpreting the results.
+
+```{r}
+plot_scatter_duration = function(df, xMetric, yMetric, xTitle, yTitle, xLabel, yLabel, correlation) {
+  return(ggplot(df, aes(x=.data[[xMetric]], y=.data[[yMetric]])) +
+    geom_point(aes(color=app)) +
+    geom_smooth(method='lm', formula=y ~ x, color="black") +
+    stat_cor(method=correlation) +
+    theme_pubr() +
+    labs(title=sprintf("Scatterplot of %s and %s", xTitle, yTitle),
+         x=xLabel,
+         y=yLabel) + 
+    theme(plot.title = element_text(hjust = 0.5)))
+}
+
+plot_scatters_duration = function(df, metrics, titles, labels, correlations) {
+  assert("metrics, titles and labels are of equal length", length(metrics) == length(titles) & length(metrics) == length(labels) & length(metrics) == length(correlations))
+  for(i in 2:length(metrics)) {
+    print(plot_scatter_duration(df, metrics[1], metrics[i], titles[1], titles[i], labels[1], labels[i], correlations[i]))
+    ggsave(sprintf("%smetric_correlations/duration/duration_%s_scatter_plot.png", exploratory_figures_path, metrics[i]))
+  }
+}
+
+# Scatter plots with Network metrics
+network_correlations = c("spearman", "spearman", "spearman", "spearman", "spearman")
+plot_scatters_duration(network_data, c("time_sec", network_metrics), c("Duration", network_metric_titles), c("Trial duration (seconds)", network_metric_labels), network_correlations)
+```
+Because the TCP data showed clear differences between apps, we color the datapoints based on that.\\
+Based on that we see no clear correlation emerging between duration and the network metrics.
+
+## Comparing groups based on energy
+To explore our dependent variable further we look how energy is distributed for our different independent variables
+```{r}
+plot_violin_box = function (df, group, title, label) {
+  return(ggplot(data, aes(x=.data[[group]], y=energy, fill=.data[[group]])) +
+    geom_violin(trim = FALSE, alpha = 0.5, show_guide = FALSE) +
+    geom_boxplot(alpha=1, color="black", width=.4, fill="white") +
+    stat_summary(fun=mean, colour="black", geom="point",
+                 shape=5, size=1, show_guide = FALSE) +
+    theme_pubr() +
+    labs(title=paste("Violin plot of Energy per", title),
+         x=label,
+         y="Energy (Joules)") + 
+    theme(legend.title=element_blank(),
+          plot.title = element_text(hjust = 0.5)))
+}
+
+plot_density_per_group = function (df, group, title, label) {
+  return(ggplot(data, aes(x=energy, fill=.data[[group]])) +
+  geom_density(alpha=0.4) +
+  theme_pubr() +
+  labs(title=paste("Density plot of Energy per", title),
+       x="Energy (Joules)") + 
+  theme(legend.title=element_blank(),
+        plot.title = element_text(hjust = 0.5)))
+}
+
+groups = c("message_type", "app", "size")
+titles = c("message type", "app", "size")
+labels = c("Message type", "App", "size")
+
+plots_per_group = function(df, groups, titles, labels) {
+  assert("groups, titles and labels are of equal length", length(groups) == length(titles) & length(groups) == length(labels))
+  for(i in 1:length(groups)) {
+    print(plot_violin_box(data, groups[i], titles[i], labels[i]))
+    ggsave(sprintf("%senergy/per_%s/energy_violin_box_plot_per_%s.png", exploratory_figures_path, groups[i], groups[i]))
+    print(plot_density_per_group(data, groups[i], titles[i], labels[i]))
+    ggsave(sprintf("%senergy/per_%s/energy_density_plot_per_%s.png", exploratory_figures_path, groups[i], groups[i]))
+  }
+}
+
+plots_per_group(data, groups, titles, labels)
+```
+
+### All
+We also investigate how energy is distributed for all 45 groups (combination of message type, app and size)
+
+```{r}
+ggplot(data, aes(x=message_type, y=energy, group=message_type)) +
+  facet_grid(size ~ app) +
+  geom_violin(trim = FALSE, alpha = 0.5, show_guide = FALSE, aes(color=message_type)) +
+  geom_boxplot(alpha=1, color="black", width=.3, fill="white") +
+  stat_summary(fun.y=mean, colour="black", geom="point",
+               shape=5, size=1, show_guide = FALSE) +
+  # theme_pubr() #+
+  labs(title="Violin plot of Energy per group",
+       x="Message type",
+       y="Energy (Joules)") +
+  theme(legend.title=element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.text=element_text(size=8))
+
+ggsave(sprintf("%senergy/energy_violin_box_plot_per_group.png", exploratory_figures_path))
+```
+## Explore effect of duration
+Because duration correlated strongly with energy consumption we explore how it is different for each group too
+```{r}
+ggplot(data, aes(x=message_type, y=time_sec, group=message_type)) +
+  facet_grid(size ~ app) +
+  geom_violin(trim = FALSE, alpha = 0.5, show_guide = FALSE, aes(color=message_type)) +
+  geom_boxplot(alpha=1, color="black", width=.3, fill="white") +
+  stat_summary(fun.y=mean, colour="black", geom="point",
+               shape=5, size=1, show_guide = FALSE) +
+  # theme_pubr() #+
+  labs(title="Violin plot of Duration per group",
+       x="Message type",
+       y="Trial duration (seconds)") +
+  theme(legend.title=element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.text=element_text(size=8))
+
+ggsave(sprintf("%sduration/duration_violin_box_plot_per_group.png", exploratory_figures_path))
+```
+We find that for Messenger the duration differs greatly for the different message types.
+
+```{r}
+ggplot(data[data$app=="Messenger",], aes(x=time_sec, fill=message_type)) +
+  geom_density(alpha=0.4) +
+  theme_pubr() +
+  labs(title=paste("Density plot of Duration per message type on Messenger"),
+       x="Trial duration (seconds)") +
+  theme(legend.title=element_blank(),
+        plot.title = element_text(hjust = 0.5))
+
+ggsave(sprintf("%sduration/duration_density_plot_per_group.png", exploratory_figures_path))
+```
+Which we can also see (possibly even more clearly) in this plot
+
+## Descriptive Statistics for research questions
+Now we dive into the different research questions and calculate descriptive statistics for them.
+
+### RQ1
+For the first research question we check how the energy differs per message type 
+```{r}
+summary_rq1_small = data %>%
+  group_by(message_type) %>%
+  summarise(count = n(),
+            mean = mean(energy),
+            sd = sd(energy))
+summary_rq1_small
+```
+
+and how that differs per size as well
+```{r}
+summary_rq1_large = data %>%
+  group_by(message_type, size) %>%
+  summarise(count = n(),
+            mean = mean(energy),
+            sd = sd(energy))
+summary_rq1_large
+```
+Text: medium size lower mean than small and large (not for other message_types)
+
+### RQ2
+For the first research question we check how the energy differs per app
+```{r}
+summary_rq2_small = data %>%
+  group_by(app) %>%
+  summarise(count = n(),
+            mean = mean(energy),
+            sd = sd(energy))
+summary_rq2_small
+```
+
+and also how that differs for each message type
+```{r}
+summary_rq2_large = data %>%
+  group_by(app, message_type) %>%
+  summarise(count = n(),
+            mean = mean(energy),
+            sd = sd(energy))
+summary_rq2_large
+```
+
+and also how that differs per size
+```{r}
+summary = data %>%
+  group_by(app, message_type, size) %>%
+  summarise(count = n(),
+            mean = mean(energy),
+            sd = sd(energy))
+summary
+```
+
+# Hypothesis testing
+We plan to use an ANOVA with 3 independent variables (size, IM app and message type)
+
+## Assumption checking
+The ANOVA has several assumptions which we need to check
+
+### 1. Normality
+The first assumption is normality, which needs to be checked for the dependent variable and the residuals
+
+#### A. Dependent variable
+We check the normality of the dependent variable (energy) for every combination of groups in multiple ways:  
+(i) By testing for it statistically using the Shapiro-Wilk test
+```{r}
+shapiro = data %>%
+  group_by(app, message_type, size) %>%
+    summarise(w.statistic = shapiro.test(energy)$statistic,
+              p.value = shapiro.test(energy)$p.value) %>%
+      arrange(w.statistic)
+shapiro
+```
+If p<0.05 we reject the null hypothesis that the dependent variable (energy) is normally distributed.  
+Otherwise we retain the assumption of normality.  
+As almost all p-values are significant, the data does not meet the assumption of normality.  
+
+(ii) by inspecting the density and QQ-plots
+```{r}
+# Function to index a grouped dataframe using a row number and column name
+index_df = function(df, row, column_name) {
+  return(unlist(df[row, column_name]))
+}
+
+# Function to subset the Data dataset based on values in the Shapiro dataset
+subset_data = function(row) {
+  subset = subset(data, app==index_df(shapiro, row, "app") & size==index_df(shapiro, row, "size" & message_type==index_df(shapiro, row, "message_type")))
+  return(subset)
+}
+
+for(i in 1:nrow(shapiro)) {
+  # Extract the right column values
+  app_val = index_df(shapiro, i, "app")
+  size_val = index_df(shapiro, i, "size")
+  message_type_val = index_df(shapiro, i, "message_type")
+  # Create a subset using these
+  subset = subset(data, app==app_val & size==size_val & message_type==message_type_val)
+  # Create a density plot
+  png(sprintf("%snormality/energy_per_group/energy_density_plot_for_%s_messages_on_%s_of_%s_size.png", exploratory_figures_path, message_type_val, tolower(app_val), size_val))
+  plot(density(subset$energy), main=sprintf("Density plot for %s messages on %s of %s size", message_type_val, app_val, size_val))
+  dev.off()
+  plot(density(subset$energy), main=sprintf("Density plot for %s messages on %s of %s size", message_type_val, app_val, size_val))
+  # Create a QQ-plot
+  png(sprintf("%snormality/energy_per_group/energy_qq_plot_for_%s_messages_on_%s_of_%s_size.png", exploratory_figures_path, message_type_val, app_val, size_val))
+  qqPlot(subset$energy, main=sprintf("QQ-plot for %s messages on %s of size %s", message_type_val, app_val, size_val), ylab="Energy (Joules)")
+  dev.off()
+  qqPlot(subset$energy, main=sprintf("QQ-plot for %s messages on %s of size %s", message_type_val, app_val, size_val), ylab="Energy (Joules)")
+}
+```
+Also these indicate that the assumption of normality is not met.
+
+#### B. Residuals
+The residuals also need to be normally distributed, which we also assess by:
+```{r}
+res.aov = aov(energy ~ message_type * app * size, data = data)
+residuals = residuals(res.aov)
+```
+(i) By testing for it statistically using the Shapiro-Wilk test
+```{r}
+shapiro.test(residuals)
+```
+If p<0.05 we reject the null hypothesis that the residuals are normally distributed.  
+Otherwise we retain the assumption of normality.  
+Given the p-value, we have to reject the null hypothesis that the residuals are normally distributed.
+
+(ii) by inspecting the density and QQ-plot
+```{r}
+# Create a density plot
+png(sprintf("%snormality/energy_residuals_density_plot.png", exploratory_figures_path))
+plot(density(residuals), main="Density plot of the Residuals")
+dev.off()
+plot(density(residuals), main="Density plot of the Residuals")
+# Create a QQ-plot
+png(sprintf("%snormality/energy_residuals_qq_plot.png", exploratory_figures_path))
+qqPlot(residuals, ylab="Residuals", main="QQ-plot of the Residuals")
+dev.off()
+qqPlot(residuals, ylab="Residuals", main="QQ-plot of the Residuals")
+```
+
+### 2. Homoscedacity
+We check whether the variances of each combination of groups are roughly equal
+
+```{r}
+leveneTest(energy ~ message_type * app * size, data = data)
+```
+If p<0.05 we reject the null hypothesis that all combinations of groups have equal variance.  
+Otherwise we retain the assumption of equal variances.\\
+Though homoscedacity was not violated, normality was violated for almost all groups as well as for the residuals. Therefore, we chose to do use an ART ANOVA instead.
+
+### ART ANOVA
+We will measure the effect size of the significant effects using partial eta squared
+```{r}
+art_transformed = art(energy ~ message_type * app * size, data = data)
+summary(art_transformed)
+```
+
+```{r}
+res.art = anova(art_transformed)
+# Include partial eta squared as effect size measure
+res.art$eta.sq.part = with(res.art, `Sum Sq`/(`Sum Sq` + `Sum Sq.res`))
+res.art
+```
+
+## Follow up tests
+We will measure the effect size of the significant effects between levels using Cliff's Delta
+
+### RQ1
+```{r}
+# Comparing differences per message_type (RQ1)
+# We leave out size as message_type:size is non-significant
+comparisons_message_type = summary(art.con(art_transformed, "message_type", adjust="BH"))
+# comparisons_message_type
+```
+
+```{r}
+c_delta_message_types = c()
+# For all combinations of message_types
+for(i in 1:(n_message_types-1)) {
+  for(j in (i+1):n_message_types) {
+    mt_i = message_types[i]
+    mt_j = message_types[j]
+    # Calculate Cliff's Delta
+    c_delta = cliff.delta(data[data$message_type==mt_i,]$energy, data[data$message_type==mt_j,]$energy)
+    # Save Cliff's Delta
+    c_delta_message_types = c(c_delta_message_types, c_delta$estimate)
+  }
+}
+comparisons_message_type$c.delta = c_delta_message_types
+print(comparisons_message_type)
+```
+Only text - video, video - image, video - document are significant
+
+### RQ2
+For the main research questions, we will first compare the differences between the apps only
+```{r}
+# Comparing differences between apps (RQ2)
+comparisons_app = summary(art.con(art_transformed, "app", adjust="BH"))
+# comparisons_app
+```
+
+```{r}
+c_delta_apps = c()
+# For all combinations of message_types
+for(i in 1:(n_apps-1)) {
+  for(j in (i+1):n_apps) {
+    app_i = apps[i]
+    app_j = apps[j]
+    # Calculate Cliff's Delta
+    c_delta = cliff.delta(data[data$app==app_i,]$energy, data[data$app==app_j,]$energy)
+    # Save Cliff's Delta
+    c_delta_apps = c(c_delta_apps, c_delta$estimate)
+  }
+}
+comparisons_app$c.delta = c_delta_apps
+print(comparisons_app)
+```
+WhatsApp is significantly worse than the others, there is no significant difference between Telegram and Messenger
+
+Then we (as the interaction between app and size is significant) will also look at how the size plays a role
+```{r}
+# Comparing differences between apps per size (RQ2)
+comparisons_app_size = summary(art.con(art_transformed, "app:size", adjust="none"))
+# Select columns of interest
+cols_comparisons_app_size = which(str_detect(comparisons_app_size$contrast , ".*small.*small.*|.*medium.*medium.*|.*large.*large.*"))
+comparisons_app_size = comparisons_app_size[cols_comparisons_app_size, ]
+# Correct p-values
+comparisons_app_size$p.value = p.adjust(comparisons_app_size$p.value, method = "BH")
+```
+
+```{r}
+c_delta_app_size = c()
+# For all combinations of message_types
+for(size in sort(sizes)) {
+  for(i in 1:(n_apps-1)) {
+    for(j in (i+1):n_apps) {
+      app_i = sort(apps)[i]
+      app_j = sort(apps)[j]
+      # Calculate Cliff's Delta
+      c_delta = cliff.delta(data[data$size==size & data$app==app_i,]$energy, data[data$size==size & data$app==app_j,]$energy)
+      # Save Cliff's Delta
+      c_delta_app_size = c(c_delta_app_size, c_delta$estimate)
+    }
+  }
+}
+# print(c_delta_message_types)
+comparisons_app_size$c.delta = c_delta_app_size
+print(comparisons_app_size)
+```
+For the subquestions we will also take into account the message type
+
+First we will disregard the size and see if we can find differences between apps per message type
+```{r}
+# Comparing differences between apps per message_type (RQ2)
+comparisons_message_type_app = summary(art.con(art_transformed, "message_type:app", adjust="none"))
+# Select columns of interest
+cols_comparisons_message_type_app = which(str_detect(comparisons_message_type_app$contrast , "^text.*text.*|^image.*image.*|^audio.*audio.*|^video.*video.*|^document.*document.*"))
+comparisons_message_type_app = comparisons_message_type_app[cols_comparisons_message_type_app, ]
+# Correct p-values
+comparisons_message_type_app$p.value = p.adjust(comparisons_message_type_app$p.value, method = "BH")
+# comparisons_message_type_app
+```
+
+```{r}
+c_delta_message_types_apps = c()
+# For all combinations of message_types
+for(mt in sort(message_types)) {
+  for(i in 1:(n_apps-1)) {
+    for(j in (i+1):n_apps) {
+      app_i = sort(apps)[i]
+      app_j = sort(apps)[j]
+      # Calculate Cliff's Delta
+      c_delta = cliff.delta(data[data$message_type==mt & data$app==app_i,]$energy, data[data$message_type==mt & data$app==app_j,]$energy)
+      # Save Cliff's Delta
+      c_delta_message_types_apps = c(c_delta_message_types_apps, c_delta$estimate)
+    }
+  }
+}
+# print(c_delta_message_types)
+comparisons_message_type_app$c.delta = c_delta_message_types_apps
+print(comparisons_message_type_app)
+```
+
+```{r}
+plot_violin_box_message_type = function(df, mt) {
+ return(ggplot(df[df$message_type==mt,], aes(x=app, y=energy, group=app)) +
+  geom_violin(trim = FALSE, alpha = 0.5, show_guide = FALSE, aes(color=app)) +
+  geom_boxplot(alpha=1, color="black", width=.3, fill="white") +
+  stat_summary(fun.y=mean, colour="black", geom="point",
+               shape=5, size=1, show_guide = FALSE) +
+  # theme_pubr() #+
+  labs(title=sprintf("Violin plot of Energy of %s messages per app", mt),
+       # x="",
+       y="Energy (Joules)") +
+  theme(legend.title=element_blank(),
+        plot.title = element_text(hjust = 0.5)))
+}
+
+plot_density_message_type = function(df, mt) {
+  return(ggplot(df[df$message_type==mt,], aes(x=energy, fill=app)) +
+  geom_density(alpha=0.4) +
+  theme_pubr() +
+  labs(title=sprintf("Density plot of Energy of %s messages per app", mt),
+       x="Energy (Joules)") + 
+  theme(legend.title=element_blank(),
+        plot.title = element_text(hjust = 0.5)))
+}
+
+plot_message_type = function(df, mts) {
+  for(mt in mts) {
+    print(plot_violin_box_message_type(df, mt))
+    ggsave(sprintf("%senergy/per_app/message_type/energy_violin_box_plot_for_%s_messages_per_app.png", exploratory_figures_path, mt))
+    print(plot_density_message_type(df, mt))
+    ggsave(sprintf("%senergy/per_app/message_type/energy_density_plot_for_%s_messages_per_app.png", exploratory_figures_path, mt))
+  }
+}
+
+plot_message_type(data, c("audio", "document", "image", "text", "video"))
+```
+For documents we can only say that Telegram is significantly more energy efficient than WhatsApp.  
+For audio we can only say that Messenger is significantly more energy efficient than WhatsApp.  
+For images we can only say that Telegram and Messenger are significantly more energy efficient than WhatsApp.  
+For text we can say that Messenger is significantly more efficient than WhatsApp and Telegram, but we cannot differentiate between WhatsApp and Telegram in terms of energy consumption.  
+For video we can say that Messenger is significantly more energy efficient than Telegram which is is significantly more energy efficient than WhatsApp (and Messenger is (thus) also significantly more energy efficient than WhatsApp).
+
+Then we will also include size to see if we still can make claims at the most detailed level
+```{r}
+# Comparing differences between apps per message_type and size (RQ2)
+comparisons_message_type_app_size = summary(art.con(art_transformed, "message_type:app:size", adjust="none"))
+# Select columns of interest
+cols_comparisons_message_type_app_size = which(str_detect(comparisons_message_type_app_size$contrast , "(?=^text.*text.*|^image.*image.*|^audio.*audio.*|^video.*video.*|^document.*document.*)(?=.*small.*small$|.*medium.*medium$|.*large.*large$)"))
+comparisons_message_type_app_size = comparisons_message_type_app_size[cols_comparisons_message_type_app_size, ]
+# Correct p-values
+comparisons_message_type_app_size$p.value = p.adjust(comparisons_message_type_app_size$p.value, method= "BH")
+# comparisons_message_type_app_size
+```
+
+```{r}
+c_delta_message_types_apps_sizes = c()
+# For all combinations of message_types
+for(size in sort(sizes)) {
+  for(mt in sort(message_types)) {
+    for(i in 1:(n_apps-1)) {
+      for(j in (i+1):n_apps) {
+        app_i = sort(apps)[i]
+        app_j = sort(apps)[j]
+        # Calculate Cliff's Delta
+        c_delta = cliff.delta(data[data$size==size & data$message_type==mt & data$app==app_i,]$energy, data[data$size==size & data$message_type==mt & data$app==app_j,]$energy)
+        # Save Cliff's Delta
+        c_delta_message_types_apps_sizes = c(c_delta_message_types_apps_sizes, c_delta$estimate)
+      }
+    }
+  }
+}
+# print(c_delta_message_types)
+comparisons_message_type_app_size$c.delta = c_delta_message_types_apps_sizes
+print(comparisons_message_type_app_size)
+```
